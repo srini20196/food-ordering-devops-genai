@@ -1,0 +1,104 @@
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+    }
+
+    environment {
+        AWS_REGION = 'ap-south-1'
+        ECR_REPOSITORY = 'food-ordering-app'
+        IMAGE_TAG = "${BUILD_NUMBER}"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Maven Build and Test') {
+            steps {
+                dir('application') {
+                    sh 'mvn -B clean test package'
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            when {
+                expression { return env.SONARQUBE_ENABLED == 'true' }
+            }
+            steps {
+                dir('application') {
+                    withSonarQubeEnv('SonarQube') {
+                        sh 'mvn -B sonar:sonar'
+                    }
+                }
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                sh 'docker build -t food-ordering-app:${IMAGE_TAG} .'
+            }
+        }
+
+        stage('Trivy Image Scan') {
+            when {
+                expression { return env.TRIVY_ENABLED == 'true' }
+            }
+            steps {
+                sh 'trivy image --exit-code 1 --severity HIGH,CRITICAL food-ordering-app:${IMAGE_TAG}'
+            }
+        }
+
+        stage('Push Image to ECR') {
+            when {
+                expression { return env.PUSH_TO_ECR == 'true' }
+            }
+            steps {
+                sh '''
+                    test -n "$AWS_ACCOUNT_ID"
+                    aws ecr get-login-password --region "$AWS_REGION" |
+                      docker login --username AWS --password-stdin \
+                      "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+                    docker tag food-ordering-app:$IMAGE_TAG \
+                      "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG"
+                    docker push \
+                      "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG"
+                '''
+            }
+        }
+
+        stage('Deploy to EKS') {
+            when {
+                expression { return env.DEPLOY_TO_EKS == 'true' }
+            }
+            steps {
+                sh '''
+                    aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME"
+                    sed "s|REPLACE_WITH_ECR_IMAGE|$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG|g" \
+                      kubernetes/deployment.yaml | kubectl apply -f -
+                    kubectl apply -f kubernetes/configmap.yaml
+                    kubectl apply -f kubernetes/service.yaml
+                    kubectl rollout status deployment/food-ordering --timeout=180s
+                '''
+            }
+        }
+    }
+
+    post {
+        always {
+            sh 'docker image prune -f || true'
+        }
+        success {
+            echo 'Food Ordering pipeline completed successfully.'
+        }
+        failure {
+            echo 'Pipeline failed. Review the stage logs before retrying.'
+        }
+    }
+}

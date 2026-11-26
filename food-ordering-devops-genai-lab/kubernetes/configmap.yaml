@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: food-ordering-config
+data:
+  SPRING_PROFILES_ACTIVE: "default"
+  APP_ENVIRONMENT: "practice"

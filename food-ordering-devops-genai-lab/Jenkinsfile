@@ -1,3 +1,4 @@
+
 pipeline {
     agent any
 
@@ -10,6 +11,7 @@ pipeline {
         AWS_REGION = 'ap-south-1'
         ECR_REPOSITORY = 'food-ordering-app'
         IMAGE_TAG = "${BUILD_NUMBER}"
+        PROJECT_DIR = 'food-ordering-devops-genai-lab'
     }
 
     stages {
@@ -21,7 +23,7 @@ pipeline {
 
         stage('Maven Build and Test') {
             steps {
-                dir('application') {
+                dir('food-ordering-devops-genai-lab/application') {
                     sh 'mvn -B clean test package'
                 }
             }
@@ -32,8 +34,8 @@ pipeline {
                 expression { return env.SONARQUBE_ENABLED == 'true' }
             }
             steps {
-                dir('application') {
-                    withSonarQubeEnv('SonarQube') {
+                dir('food-ordering-devops-genai-lab/application') {
+                    withSonarQubeEnv('SonarCloud') {
                         sh 'mvn -B sonar:sonar'
                     }
                 }
@@ -42,7 +44,12 @@ pipeline {
 
         stage('Docker Build') {
             steps {
-                sh 'docker build -t food-ordering-app:${IMAGE_TAG} .'
+                sh '''
+                    docker build \
+                      -t food-ordering-app:${IMAGE_TAG} \
+                      -f ${PROJECT_DIR}/Dockerfile \
+                      ${PROJECT_DIR}
+                '''
             }
         }
 
@@ -62,11 +69,14 @@ pipeline {
             steps {
                 sh '''
                     test -n "$AWS_ACCOUNT_ID"
+
                     aws ecr get-login-password --region "$AWS_REGION" |
                       docker login --username AWS --password-stdin \
                       "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+
                     docker tag food-ordering-app:$IMAGE_TAG \
                       "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG"
+
                     docker push \
                       "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG"
                 '''
@@ -80,10 +90,13 @@ pipeline {
             steps {
                 sh '''
                     aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME"
+
                     sed "s|REPLACE_WITH_ECR_IMAGE|$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG|g" \
-                      kubernetes/deployment.yaml | kubectl apply -f -
-                    kubectl apply -f kubernetes/configmap.yaml
-                    kubectl apply -f kubernetes/service.yaml
+                      ${PROJECT_DIR}/kubernetes/deployment.yaml | kubectl apply -f -
+
+                    kubectl apply -f ${PROJECT_DIR}/kubernetes/configmap.yaml
+                    kubectl apply -f ${PROJECT_DIR}/kubernetes/service.yaml
+
                     kubectl rollout status deployment/food-ordering --timeout=180s
                 '''
             }
@@ -94,9 +107,11 @@ pipeline {
         always {
             sh 'docker image prune -f || true'
         }
+
         success {
             echo 'Food Ordering pipeline completed successfully.'
         }
+
         failure {
             echo 'Pipeline failed. Review the stage logs before retrying.'
         }
